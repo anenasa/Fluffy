@@ -24,7 +24,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "app.fluffy"
+        applicationId = "app.fluffy.anenasa"
         minSdk = 24
         targetSdk = 37
         versionCode = 970
