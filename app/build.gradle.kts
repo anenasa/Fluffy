@@ -26,7 +26,8 @@ android {
     defaultConfig {
         applicationId = "app.fluffy.anenasa"
         minSdk = 24
-        targetSdk = 36
+        //noinspection ExpiredTargetSdkVersion
+        targetSdk = 29
         versionCode = 730
         versionName = "4.1.7"
 
