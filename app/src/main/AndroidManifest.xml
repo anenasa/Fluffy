@@ -94,7 +94,7 @@
 
         <activity
             android:name=".MainActivity"
-            android:label="Fluffy"
+            android:label="Fluffy.an"
             android:configChanges="uiMode"
             android:exported="true"
             android:launchMode="singleTask"
