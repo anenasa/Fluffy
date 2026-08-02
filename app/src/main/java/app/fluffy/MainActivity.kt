@@ -1,16 +1,12 @@
 package app.fluffy
 
-import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
@@ -51,7 +47,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.lifecycleScope
@@ -62,6 +57,9 @@ import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDe
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.work.WorkInfo
 import app.fluffy.data.repository.AppSettings
+import app.fluffy.data.repository.SettingsRepository
+import app.fluffy.io.SafIo
+import app.fluffy.platform.StorageAccessPolicy
 import app.fluffy.helper.OpenTarget
 import app.fluffy.helper.detectTarget
 import app.fluffy.helper.launchImageViewer
@@ -70,6 +68,7 @@ import app.fluffy.helper.openWithExportMultiple
 import app.fluffy.helper.purgeOldExports
 import app.fluffy.helper.purgeOldViewerCache
 import app.fluffy.helper.toViewableUris
+import app.fluffy.helper.exportForOpenWith
 import app.fluffy.io.FileSystemAccess
 import app.fluffy.operations.ArchiveJobManager
 import app.fluffy.ui.components.ConfirmationDialog
@@ -85,10 +84,12 @@ import app.fluffy.ui.util.ScreenKey
 import app.fluffy.viewmodel.BrowseLocation
 import app.fluffy.viewmodel.FileBrowserState
 import app.fluffy.viewmodel.FileBrowserViewModel
+import app.fluffy.viewmodel.PendingAction
 import app.fluffy.viewmodel.SettingsViewModel
 import app.fluffy.viewmodel.TasksViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.koin.android.ext.android.inject
 import org.koin.androidx.viewmodel.ext.android.viewModel
 import org.koin.compose.koinInject
 import java.io.File
@@ -101,11 +102,7 @@ class MainActivity : ComponentActivity() {
     private var pickerMimeType: String? = null
 
     // Pending operations that need a destination folder
-    private var pendingCopy: List<Uri>? = null
-    private var pendingMove: List<Uri>? = null
-    private var pendingExtractArchive: Uri? = null
-    private var pendingExtractPassword: String? = null
-    private var pendingExtractPaths: List<String>? = null
+    private var pendingAction: PendingAction = PendingAction.None
 
     // SAF tree pickers
     private lateinit var pickRoot: ActivityResultLauncher<Uri?>
@@ -114,6 +111,10 @@ class MainActivity : ComponentActivity() {
     private val showInAppFolderPicker = mutableStateOf(false)
     private val inAppFolderPickerTitle = mutableStateOf("")
     private var pendingFolderPickCallback: ((Uri) -> Unit)? = null
+
+    private val io: SafIo by inject()
+    private val settingsRepository: SettingsRepository by inject()
+    private val storageAccessPolicy: StorageAccessPolicy by inject()
 
     private val filesVM: FileBrowserViewModel by viewModel()
     private val tasksVM: TasksViewModel by viewModel()
@@ -141,12 +142,10 @@ class MainActivity : ComponentActivity() {
     private val manageStoragePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (Environment.isExternalStorageManager()) {
-                filesVM.onPermissionsChanged()
-            } else {
-                requestRegularStoragePermissions()
-            }
+        if (storageAccessPolicy.hasStoragePermission()) {
+            filesVM.onPermissionsChanged()
+        } else {
+            requestRegularStoragePermissions()
         }
     }
 
@@ -158,7 +157,6 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        AppGraph.init(applicationContext)
         
         inAppFolderPickerTitle.value = "Choose destination folder"
 
@@ -198,7 +196,7 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            val s by AppGraph.settings.settingsFlow.collectAsState(initial = AppSettings())
+            val s by settingsRepository.settingsFlow.collectAsState(initial = AppSettings())
 
             val dark = when (s.themeMode) {
                 0 -> isSystemInDarkTheme()
@@ -245,20 +243,22 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                LaunchedEffect(browserState.pendingFileOpen) {
-                    browserState.pendingFileOpen?.let { uri ->
-                        val name = uri.lastPathSegment?.lowercase() ?: ""
-                        if (FileSystemAccess.isArchiveFile(name)) {
-                            backStack.add(ScreenKey.Archive(uri = uri.toString()))
-                            filesVM.clearPendingFileOpen()
+                LaunchedEffect(browserState.pendingAction) {
+                    when (val action = browserState.pendingAction) {
+                        is PendingAction.OpenFile -> {
+                            val name = action.uri.lastPathSegment?.lowercase() ?: ""
+                            if (FileSystemAccess.isArchiveFile(name)) {
+                                backStack.add(ScreenKey.Archive(uri = action.uri.toString()))
+                                filesVM.clearPendingAction()
+                            }
                         }
-                    }
-                }
 
-                LaunchedEffect(browserState.pendingArchiveOpen) {
-                    browserState.pendingArchiveOpen?.let { uri ->
-                        backStack.add(ScreenKey.Archive(uri = uri.toString()))
-                        filesVM.clearPendingArchiveOpen()
+                        is PendingAction.OpenArchive -> {
+                            backStack.add(ScreenKey.Archive(uri = action.uri.toString()))
+                            filesVM.clearPendingAction()
+                        }
+
+                        else -> Unit
                     }
                 }
 
@@ -335,23 +335,23 @@ class MainActivity : ComponentActivity() {
                                         },
 
                                         onCopySelected = { list ->
-                                            pendingCopy = list
+                                            pendingAction = PendingAction.Copy(list)
                                             launchPickTargetDirOrFallback(s.alwaysUseInAppFolderPicker)
                                         },
 
                                         onMoveSelected = { list ->
-                                            pendingMove = list
+                                            pendingAction = PendingAction.Move(list)
                                             launchPickTargetDirOrFallback(s.alwaysUseInAppFolderPicker)
                                         },
 
                                         onDeleteSelected = { list ->
                                             lifecycleScope.launch {
-                                                val ss = AppGraph.settings.settingsFlow.first()
+                                                val ss = settingsRepository.settingsFlow.first()
                                                 val touchesShell = list.any { it.scheme == "root" || it.scheme == "shizuku" }
                                                 val proceed: () -> Unit = {
                                                     lifecycleScope.launch {
                                                         list.forEach {
-                                                            AppGraph.io.deleteTree(it)
+                                                            io.deleteTree(it)
                                                             DirectoryCounter.invalidateParent(it)
                                                         }
                                                         filesVM.refreshCurrentDir()
@@ -368,10 +368,10 @@ class MainActivity : ComponentActivity() {
                                             }
                                         },
 
-                                        onRenameOne = { uri, newName ->
+                                        onRenameOne = { uri, newName, _ ->
                                             lifecycleScope.launch {
                                                 if (newName.isNotBlank()) {
-                                                    AppGraph.io.rename(uri, newName)
+                                                    io.rename(uri, newName)
                                                     filesVM.refreshCurrentDir()
                                                 }
                                             }
@@ -440,7 +440,9 @@ class MainActivity : ComponentActivity() {
                                             }
                                         },
 
-                                        showFileCount = s.showFileCount
+                                        showFileCount = s.showFileCount,
+                                        showStorageInfo = s.showStorageInfo,
+                                        storageBelowBookmarks = s.storageBelowBookmarks
                                     )
                                 }
 
@@ -465,9 +467,11 @@ class MainActivity : ComponentActivity() {
                                                     onAfterEnqueue = { if (backStack.size > 1) backStack.removeAt(backStack.lastIndex) }
                                                 )
                                             } else {
-                                                pendingExtractArchive = arch
-                                                pendingExtractPassword = pwd
-                                                pendingExtractPaths = null
+                                                pendingAction = PendingAction.Extract(
+                                                    archive = arch,
+                                                    password = pwd,
+                                                    includePaths = null
+                                                )
                                                 launchPickTargetDirOrFallback(s.alwaysUseInAppFolderPicker)
                                             }
                                         },
@@ -486,9 +490,11 @@ class MainActivity : ComponentActivity() {
                                                     onAfterEnqueue = { if (backStack.size > 1) backStack.removeAt(backStack.lastIndex) }
                                                 )
                                             } else {
-                                                pendingExtractArchive = arch
-                                                pendingExtractPassword = pwd
-                                                pendingExtractPaths = paths
+                                                pendingAction = PendingAction.Extract(
+                                                    archive = arch,
+                                                    password = pwd,
+                                                    includePaths = paths
+                                                )
                                                 launchPickTargetDirOrFallback(s.alwaysUseInAppFolderPicker)
                                             }
                                         },
@@ -624,37 +630,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleTargetDirPicked(target: Uri) {
-        // Apply whichever pending operation exists. Clear pending after.
-        val copy = pendingCopy
-        val move = pendingMove
-        val exArch = pendingExtractArchive
-
-        when {
-            copy != null -> {
-                pendingCopy = null
+        when (val action = pendingAction) {
+            is PendingAction.Copy -> {
+                pendingAction = PendingAction.None
                 confirmShellWrite(target) {
-                    tasksVM.enqueueCopy(copy, target, overwrite = false)
+                    tasksVM.enqueueCopy(action.uris, target, overwrite = false)
                 }
             }
 
-            move != null -> {
-                pendingMove = null
+            is PendingAction.Move -> {
+                pendingAction = PendingAction.None
                 confirmShellWrite(target) {
-                    tasksVM.enqueueMove(move, target, overwrite = false)
+                    tasksVM.enqueueMove(action.uris, target, overwrite = false)
                 }
             }
 
-            exArch != null -> {
-                val pwd = pendingExtractPassword
-                val paths = pendingExtractPaths
-                pendingExtractArchive = null
-                pendingExtractPassword = null
-                pendingExtractPaths = null
-
+            is PendingAction.Extract -> {
+                pendingAction = PendingAction.None
                 extractWithConfirm(
-                    archive = exArch,
-                    password = pwd,
-                    includePaths = paths,
+                    archive = action.archive,
+                    password = action.password,
+                    includePaths = action.includePaths,
                     targetDir = target
                 )
             }
@@ -695,16 +691,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun returnPickedFile(uri: Uri) {
-        val resultIntent = Intent().apply {
-            data = uri
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        lifecycleScope.launch {
+            val shareable = runCatching {
+                applicationContext.exportForOpenWith(uri, io.queryDisplayName(uri))
+            }.getOrElse { uri }
 
-            if (intent?.action == Intent.ACTION_OPEN_DOCUMENT) {
-                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            val mime = contentResolver.getType(shareable)
+                ?: FileSystemAccess.getMimeType(io.queryDisplayName(shareable))
+
+            val resultIntent = Intent().apply {
+                data = shareable
+                type = mime
+                clipData = ClipData.newUri(contentResolver, "picked", shareable)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+                if (intent?.action == Intent.ACTION_OPEN_DOCUMENT) {
+                    addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                }
             }
+            setResult(RESULT_OK, resultIntent)
+            finish()
         }
-        setResult(RESULT_OK, resultIntent)
-        finish()
     }
 
     private fun childExists(parent: Uri, name: String): Boolean {
@@ -720,92 +727,38 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkStoragePermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!Environment.isExternalStorageManager()) {
-                if (canRequestManageStorage()) {
-                    requestManageStoragePermission()
-                } else {
-                    requestRegularStoragePermissions()
-                }
-            }
+        if (!storageAccessPolicy.hasStoragePermission()) {
+            requestStoragePermission()
         }
     }
 
     private fun requestStoragePermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (canRequestManageStorage()) {
-                requestManageStoragePermission()
-            } else {
-                requestRegularStoragePermissions()
-            }
+        if (storageAccessPolicy.shouldUseManageStorageFlow()) {
+            requestManageStoragePermission()
         } else {
             requestRegularStoragePermissions()
         }
     }
 
-    private fun canRequestManageStorage(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-
-        val specificIntent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-            data = "package:$packageName".toUri()
-        }
-        if (specificIntent.resolveActivity(packageManager) != null) return true
-
-        val generalIntent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-        return generalIntent.resolveActivity(packageManager) != null
-    }
-
     private fun requestRegularStoragePermissions() {
-        val permissions = mutableListOf<String>()
-
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.READ_EXTERNAL_STORAGE
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
-        }
-
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            }
-        }
-
+        val permissions = storageAccessPolicy.missingRegularPermissions()
         if (permissions.isNotEmpty()) {
             storagePermissionLauncher.launch(permissions.toTypedArray())
         }
     }
 
     private fun requestManageStoragePermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                intent.data = "package:$packageName".toUri()
-
-                if (intent.resolveActivity(packageManager) != null) {
-                    manageStoragePermissionLauncher.launch(intent)
-                } else {
-                    val generalIntent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                    if (generalIntent.resolveActivity(packageManager) != null) {
-                        manageStoragePermissionLauncher.launch(generalIntent)
-                    } else {
-                        requestRegularStoragePermissions()
-                    }
-                }
-            } catch (_: Exception) {
-                requestRegularStoragePermissions()
-            }
+        val intent = storageAccessPolicy.createManageStorageIntent()
+        if (intent != null) {
+            manageStoragePermissionLauncher.launch(intent)
+        } else {
+            requestRegularStoragePermissions()
         }
     }
 
     private fun confirmShellWrite(target: Uri, proceed: () -> Unit) {
         lifecycleScope.launch {
-            val s = AppGraph.settings.settingsFlow.first()
+            val s = settingsRepository.settingsFlow.first()
             val needsWarn = s.warnBeforeShellWrites && (target.scheme == "root" || target.scheme == "shizuku")
             if (needsWarn) {
                 overwriteMessage.value =
@@ -828,10 +781,10 @@ class MainActivity : ComponentActivity() {
                 if (u.scheme == "root" || u.scheme == "shizuku") return@map u
 
                 if (u.scheme == "content") {
-                    val name = sanitizeName(AppGraph.io.queryDisplayName(u))
+                    val name = sanitizeName(io.queryDisplayName(u))
                     val out = File(cacheDir, "incoming_${System.currentTimeMillis()}_$name")
                     runCatching {
-                        AppGraph.io.openIn(u).use { input ->
+                        io.openIn(u).use { input ->
                             out.outputStream().use { input.copyTo(it) }
                         }
                         return@map Uri.fromFile(out)
@@ -847,8 +800,8 @@ class MainActivity : ComponentActivity() {
     private fun handleSharedUris(uris: List<Uri>) {
         lifecycleScope.launch {
             val staged = stageSharedIfNeeded(uris)
-            pendingCopy = staged
-            val s = AppGraph.settings.settingsFlow.first()
+            pendingAction = PendingAction.Copy(staged)
+            val s = settingsRepository.settingsFlow.first()
             launchPickTargetDirOrFallback(s.alwaysUseInAppFolderPicker)
         }
     }

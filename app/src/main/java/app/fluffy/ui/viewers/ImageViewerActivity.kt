@@ -24,10 +24,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -58,16 +61,21 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
-import app.fluffy.AppGraph
 import app.fluffy.data.repository.AppSettings
+import app.fluffy.data.repository.SettingsRepository
 import app.fluffy.io.ShellIo
 import app.fluffy.ui.theme.FluffyTheme
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.launch
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 import java.io.File
 
-class ImageViewerActivity : ComponentActivity() {
+class ImageViewerActivity : ComponentActivity(), KoinComponent {
+    private val settings: SettingsRepository by inject()
+    private val shellIo: ShellIo by inject()
+
     companion object {
         const val EXTRA_IMAGES = "images"
         const val EXTRA_INITIAL_INDEX = "initial"
@@ -76,7 +84,6 @@ class ImageViewerActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        AppGraph.init(applicationContext)
 
         val fromExtras = intent.getStringArrayListExtra(EXTRA_IMAGES)?.mapNotNull { runCatching { it.toUri() }.getOrNull() }.orEmpty()
         val fromData = intent.data?.let { listOf(it) }.orEmpty()
@@ -112,13 +119,13 @@ class ImageViewerActivity : ComponentActivity() {
         val title = intent.getStringExtra(EXTRA_TITLE) ?: deriveTitle(allUris, startIndex)
 
         setContent {
-            val settings = AppGraph.settings.settingsFlow.collectAsState(initial = AppSettings()).value
-            val dark = when (settings.themeMode) {
+            val s = settings.settingsFlow.collectAsState(initial = AppSettings()).value
+            val dark = when (s.themeMode) {
                 0 -> isSystemInDarkTheme()
                 1 -> false
                 else -> true
             }
-            FluffyTheme(darkTheme = dark, useAuroraTheme = settings.useAuroraTheme) {
+            FluffyTheme(darkTheme = dark, useAuroraTheme = s.useAuroraTheme) {
                 FullscreenImageViewer(
                     images = allUris.map { it.toString() },
                     initialPage = startIndex,
@@ -187,8 +194,8 @@ class ImageViewerActivity : ComponentActivity() {
                     val parentPath = File(path).parent ?: return listOf(uri)
 
                     val siblings = when (uri.scheme) {
-                        "root" -> ShellIo.listRoot(parentPath)
-                        "shizuku" -> ShellIo.listShizuku(parentPath)
+                        "root" -> shellIo.listRoot(parentPath)
+                        "shizuku" -> shellIo.listShizuku(parentPath)
                         else -> emptyList()
                     }
 
@@ -435,11 +442,10 @@ fun FullscreenImageViewer(
             Box(modifier = Modifier.focusable(false)) {
                 TopAppBar(
                     title = { Text("$displayIndex / ${images.size}") },
-                    actions = {
-                        TextButton(
-                            onClick = onClose,
-                            modifier = Modifier.focusable(false)
-                        ) { Text("Close") }
+                    navigationIcon = {
+                        IconButton(onClick = onClose) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
                     }
                 )
             }

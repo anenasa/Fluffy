@@ -30,13 +30,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.CircularWavyProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -72,18 +77,21 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.createBitmap
-import app.fluffy.AppGraph
 import app.fluffy.data.repository.AppSettings
+import app.fluffy.data.repository.SettingsRepository
 import app.fluffy.ui.theme.FluffyTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 import java.io.File
 import java.io.FileOutputStream
 
-class PdfViewerActivity : ComponentActivity() {
+class PdfViewerActivity : ComponentActivity(), KoinComponent {
+    private val settings: SettingsRepository by inject()
     companion object {
         const val EXTRA_URI = "uri"
     }
@@ -99,15 +107,16 @@ class PdfViewerActivity : ComponentActivity() {
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
         setContent {
-            val settings = AppGraph.settings.settingsFlow.collectAsState(initial = AppSettings()).value
-            val dark = when (settings.themeMode) {
+            val s = settings.settingsFlow.collectAsState(initial = AppSettings()).value
+            val dark = when (s.themeMode) {
                 0 -> isSystemInDarkTheme()
                 1 -> false
                 else -> true
             }
-            FluffyTheme(darkTheme = dark, useAuroraTheme = settings.useAuroraTheme) {
+            FluffyTheme(darkTheme = dark, useAuroraTheme = s.useAuroraTheme) {
                 FullscreenPdfViewer(
                     uri = inputUri,
+                    appSettings = s,
                     onClose = { finish() }
                 )
             }
@@ -186,7 +195,7 @@ private fun PdfPageImage(
     viewportW: Int,
     viewportH: Int,
     scaleForQuality: Float,
-    nightInvertEnabled: Boolean,
+    darkModeEnabled: Boolean,
     modifier: Modifier = Modifier
 ) {
     var bmp by remember(pageIndex) { mutableStateOf<Bitmap?>(null) }
@@ -217,13 +226,14 @@ private fun PdfPageImage(
         }
     }
 
-    val invert = remember {
+    val darkModeMatrix = remember {
+        val warmR = 1.00f; val warmG = 0.92f; val warmB = 0.72f
         ColorMatrix(
             floatArrayOf(
-                -1f, 0f, 0f, 0f, 255f,
-                0f, -1f, 0f, 0f, 255f,
-                0f, 0f, -1f, 0f, 255f,
-                0f, 0f, 0f, 1f, 0f
+                -0.299f * warmR, -0.587f * warmR, -0.114f * warmR, 0f, 255f * warmR,
+                -0.299f * warmG, -0.587f * warmG, -0.114f * warmG, 0f, 255f * warmG,
+                -0.299f * warmB, -0.587f * warmB, -0.114f * warmB, 0f, 255f * warmB,
+                0f,              0f,              0f,              1f, 0f
             )
         )
     }
@@ -234,7 +244,7 @@ private fun PdfPageImage(
             contentDescription = null,
             modifier = modifier,
             contentScale = ContentScale.Fit,
-            colorFilter = if (nightInvertEnabled) ColorFilter.colorMatrix(invert) else null
+            colorFilter = if (darkModeEnabled) ColorFilter.colorMatrix(darkModeMatrix) else null
         )
     }
 }
@@ -244,6 +254,7 @@ private fun PdfPageImage(
 @Composable
 private fun FullscreenPdfViewer(
     uri: Uri,
+    appSettings: AppSettings,
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
@@ -285,31 +296,31 @@ private fun FullscreenPdfViewer(
 
     val title = "${pagerState.currentPage + 1} / $pageCount"
 
-    val settings = AppGraph.settings.settingsFlow.collectAsState(initial = AppSettings()).value
-    val dark = when (settings.themeMode) {
+    val dark = when (appSettings.themeMode) {
         0 -> isSystemInDarkTheme()
         1 -> false
         else -> true
     }
 
-    var invertColorScheme by remember { mutableStateOf(dark) }
+    var pdfDarkMode by remember { mutableStateOf(dark) }
 
+    FluffyTheme(darkTheme = pdfDarkMode, useAuroraTheme = appSettings.useAuroraTheme) {
     Scaffold(
         topBar = {
             Box(modifier = Modifier.focusable(false)) {
                 TopAppBar(
                     title = { Text(title) },
+                    navigationIcon = {
+                        IconButton(onClick = onClose) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    },
                     actions = {
-//                        ToggleButton( checked = dark, onCheckedChange = { invertColorScheme = !invertColorScheme } ) {
-//                            Icon(
-//                                imageVector =
-//                                     Icons.Outlined.DarkMode,
-//                                contentDescription = null,
-//                                tint = colorScheme.background.copy(alpha = 0.3f),
-//                            )
-//                        }
-                        TextButton(onClick = onClose, modifier = Modifier.focusable(false)) {
-                            Text("Close")
+                        IconButton(onClick = { pdfDarkMode = !pdfDarkMode }) {
+                            Icon(
+                                imageVector = if (pdfDarkMode) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
+                                contentDescription = if (pdfDarkMode) "Switch to light" else "Switch to dark"
+                            )
                         }
                     }
                 )
@@ -490,13 +501,14 @@ private fun FullscreenPdfViewer(
                             viewportW = viewportW,
                             viewportH = viewportH,
                             scaleForQuality = scaleAnim.value,
-                            nightInvertEnabled = invertColorScheme,
+                            darkModeEnabled = pdfDarkMode,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
             }
         }
+    }
     }
 
     DisposableEffect(Unit) {

@@ -21,15 +21,15 @@ kotlin {
 }
 
 android {
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "app.fluffy.anenasa"
         minSdk = 24
         //noinspection ExpiredTargetSdkVersion
         targetSdk = 29
-        versionCode = 730
-        versionName = "4.1.7"
+        versionCode = 800
+        versionName = "4.2.5"
 
         androidResources {
             localeFilters += setOf("en", "ar", "de", "es-rES", "es-rUS", "fr", "hr", "hu", "in", "it", "ja", "pl", "pt-rBR", "ru-rRU", "sv", "tr", "uk", "zh")
@@ -81,7 +81,6 @@ android {
             isShrinkResources = true
         }
         getByName("debug") {
-            isShrinkResources = false
             isDebuggable = true
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
@@ -144,7 +143,6 @@ dependencies {
     implementation(libs.koin.android)
     implementation(libs.koin.androidx.compose)
     implementation(libs.koin.annotations)
-    ksp(libs.koin.ksp.compiler)
 
 
     implementation(libs.androidx.navigation3.runtime)
@@ -185,7 +183,6 @@ dependencies {
     implementation(libs.api)
     implementation(libs.provider)
 
-    implementation(libs.richeditor.compose)
 
 
     // Testing

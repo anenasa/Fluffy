@@ -1,6 +1,8 @@
 package app.fluffy.ui.screens
 
 import android.net.Uri
+import android.os.Environment
+import android.os.StatFs
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -66,6 +68,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -82,8 +85,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -93,6 +100,7 @@ import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import app.fluffy.R
 import app.fluffy.data.repository.Bookmark
+import app.fluffy.io.ShellIo
 import app.fluffy.helper.cardAsFocusGroup
 import app.fluffy.ui.components.AlertBanner
 import app.fluffy.ui.components.AlertBannerManager
@@ -102,8 +110,10 @@ import app.fluffy.ui.components.toRowModel
 import app.fluffy.ui.dialogs.AddBookmarkDialog
 import app.fluffy.viewmodel.BrowseLocation
 import app.fluffy.viewmodel.FileBrowserState
+import app.fluffy.util.UiFormat.formatSize
 import app.fluffy.viewmodel.QuickAccessItem
 import kotlinx.coroutines.launch
+import org.koin.compose.koinInject
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -127,7 +137,7 @@ fun FileBrowserScreen(
     onDeleteSelected: (List<Uri>) -> Unit = {},
     onShareSelected: (List<Uri>) -> Unit = {},
     onPasteClipboard: (String) -> Unit = {},
-    onRenameOne: (Uri, String) -> Unit = { _, _ -> },
+    onRenameOne: (Uri, String, String) -> Unit = { _, _, _ -> },
     onCreate7z: (List<Uri>, String, String?, Uri, Boolean) -> Unit = { _, _, _, _, _ -> },
     onOpenFile: (File) -> Unit = {},
     onQuickAccessClick: (QuickAccessItem) -> Unit = {},
@@ -139,12 +149,16 @@ fun FileBrowserScreen(
     onCreateFolder: (String) -> Unit = {},
     onCreateFile: (String) -> Unit = {},
     showFileCount: Boolean = true,
+    showStorageInfo: Boolean = true,
+    storageBelowBookmarks: Boolean = false,
 
     pickFolderMode: Boolean = false,
     pickFolderTitle: String = "Choose destination folder",
     onPickFolder: (Uri) -> Unit = {},
     onCancelPickFolder: () -> Unit = {},
 ) {
+    val shellIo: ShellIo = koinInject()
+
     val currentLocation = state.currentLocation
     val canUp = state.stack.size > 1
     val canGoBack = currentLocation != null && currentLocation !is BrowseLocation.QuickAccess
@@ -162,8 +176,9 @@ fun FileBrowserScreen(
     var showZipNameDialog by remember { mutableStateOf(false) }
     var show7zDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<Uri?>(null) }
+    var renameOriginalName by remember { mutableStateOf("") }
     var showRenameDialog by remember { mutableStateOf(false) }
-    var renameNewName by remember { mutableStateOf("") }
+    var renameTextFieldValue by remember { mutableStateOf(TextFieldValue("")) }
     var showNewFolderDialog by remember { mutableStateOf(false) }
     var showNewFileDialog by remember { mutableStateOf(false) }
     var showPasteClipboardDialog by remember { mutableStateOf(false) }
@@ -235,8 +250,8 @@ fun FileBrowserScreen(
             "root", "shizuku" -> {
                 val base = parent.path ?: "/"
                 when (parent.scheme) {
-                    "root" -> app.fluffy.io.ShellIo.listRoot(base).any { it.first == name }
-                    else -> app.fluffy.io.ShellIo.listShizuku(base).any { it.first == name }
+                    "root" -> shellIo.listRoot(base).any { it.first == name }
+                    else -> shellIo.listShizuku(base).any { it.first == name }
                 }
             }
             else -> false
@@ -549,8 +564,13 @@ fun FileBrowserScreen(
                                     if (count == 1) {
                                         AssistChip(
                                             onClick = {
-                                                renameTarget = allSelectedUris.first()
-                                                renameNewName = ""
+                                                val target = allSelectedUris.first()
+                                                val name = getNameForUri(target, currentLocation, state) ?: ""
+                                                val ext = name.substringAfterLast('.', "")
+                                                val baseLen = if (ext.isNotEmpty()) name.length - ext.length - 1 else name.length
+                                                renameTarget = target
+                                                renameOriginalName = name
+                                                renameTextFieldValue = TextFieldValue(text = name, selection = TextRange(0, baseLen))
                                                 showRenameDialog = true
                                             },
                                             label = { Text("Rename") },
@@ -597,8 +617,13 @@ fun FileBrowserScreen(
 
                                     if (count == 1) {
                                         TextButton(onClick = {
-                                            renameTarget = allSelectedUris.first()
-                                            renameNewName = ""
+                                            val target = allSelectedUris.first()
+                                            val name = getNameForUri(target, currentLocation, state) ?: ""
+                                            val ext = name.substringAfterLast('.', "")
+                                            val baseLen = if (ext.isNotEmpty()) name.length - ext.length - 1 else name.length
+                                            renameTarget = target
+                                            renameOriginalName = name
+                                            renameTextFieldValue = TextFieldValue(text = name, selection = TextRange(0, baseLen))
                                             showRenameDialog = true
                                         }) { Text("Rename") }
                                         TextButton(onClick = {
@@ -630,6 +655,8 @@ fun FileBrowserScreen(
                     onRemoveBookmark = onRemoveBookmark,
                     onRequestPermission = onRequestPermission,
                     hasPermission = state.canAccessFileSystem,
+                    showStorageInfo = showStorageInfo,
+                    storageBelowBookmarks = storageBelowBookmarks,
                     modifier = Modifier.padding(it)
                 )
             }
@@ -999,21 +1026,26 @@ fun FileBrowserScreen(
     }
 
     if (showRenameDialog && renameTarget != null) {
+        val focusRequester = remember { FocusRequester() }
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
             title = { Text("Rename") },
             text = {
                 OutlinedTextField(
-                    value = renameNewName,
-                    onValueChange = { renameNewName = it },
+                    value = renameTextFieldValue,
+                    onValueChange = { renameTextFieldValue = it },
                     singleLine = true,
-                    label = { Text("New name") }
+                    label = { Text("New name") },
+                    modifier = Modifier.focusRequester(focusRequester)
                 )
             },
             confirmButton = {
+                LaunchedEffect(Unit) {
+                    focusRequester.requestFocus()
+                }
                 TextButton(onClick = {
                     val t = renameTarget!!
-                    onRenameOne(t, renameNewName)
+                    onRenameOne(t, renameTextFieldValue.text, renameOriginalName)
                     showRenameDialog = false
                     selected.clear()
                     selectedFiles.clear()
@@ -1065,6 +1097,8 @@ private fun QuickAccessView(
     onRemoveBookmark: (Bookmark) -> Unit,
     onRequestPermission: () -> Unit,
     hasPermission: Boolean,
+    showStorageInfo: Boolean = true,
+    storageBelowBookmarks: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     if (!hasPermission) {
@@ -1110,6 +1144,40 @@ private fun QuickAccessView(
                 QuickAccessCard(item = item, onClick = { if (item.enabled) onItemClick(item) })
             }
 
+            val storageSection: @Composable () -> Unit = {
+                val storage = rememberDeviceStorage()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp, bottom = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        StorageInfoCard(
+                            modifier = Modifier.weight(1f),
+                            label = "Total Storage",
+                            value = formatSize(storage.totalBytes)
+                        )
+                        StorageInfoCard(
+                            modifier = Modifier.weight(1f),
+                            label = "Remaining Storage",
+                            value = formatSize(storage.freeBytes)
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    StorageUsageBar(
+                        usedBytes = storage.totalBytes - storage.freeBytes,
+                        totalBytes = storage.totalBytes
+                    )
+                }
+            }
+
+            if (showStorageInfo && !storageBelowBookmarks) {
+                item(span = { GridItemSpan(maxLineSpan) }) { storageSection() }
+            }
+
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Row(
                     modifier = Modifier
@@ -1140,7 +1208,89 @@ private fun QuickAccessView(
                     }
                 )
             }
+
+            if (showStorageInfo && storageBelowBookmarks) {
+                item(span = { GridItemSpan(maxLineSpan) }) { storageSection() }
+            }
         }
+    }
+}
+
+private data class DeviceStorage(val totalBytes: Long, val freeBytes: Long)
+
+@Composable
+private fun rememberDeviceStorage(): DeviceStorage {
+    return remember {
+        val stat = StatFs(Environment.getExternalStorageDirectory().path)
+        val blockSize = stat.blockSizeLong
+        DeviceStorage(
+            totalBytes = stat.totalBytes,
+            freeBytes = stat.availableBytes
+        )
+    }
+}
+
+@Composable
+private fun StorageInfoCard(label: String, value: String, modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(100.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Storage,
+                contentDescription = null,
+                modifier = Modifier.size(32.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                value,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun StorageUsageBar(usedBytes: Long, totalBytes: Long) {
+    val usedRatio = if (totalBytes > 0) (usedBytes.toFloat() / totalBytes) else 0f
+    val used = formatSize(usedBytes)
+    val total = formatSize(totalBytes)
+    Column(modifier = Modifier.fillMaxWidth()) {
+        LinearProgressIndicator(
+            progress = { usedRatio.coerceIn(0f, 1f) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "$used used of $total",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -1222,6 +1372,20 @@ private fun BookmarkCard(
                 color = if (isEditMode) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer
             )
         }
+    }
+}
+
+private fun getNameForUri(uri: Uri, location: BrowseLocation?, state: FileBrowserState): String? {
+    return when (location) {
+        is BrowseLocation.FileSystem -> state.fileItems.find { Uri.fromFile(it) == uri }?.name
+        is BrowseLocation.SAF -> {
+            if (state.currentDir?.scheme in listOf("root", "shizuku")) {
+                state.shellItems.find { it.uri == uri }?.name
+            } else {
+                state.items.find { it.uri == uri }?.name
+            }
+        }
+        else -> null
     }
 }
 

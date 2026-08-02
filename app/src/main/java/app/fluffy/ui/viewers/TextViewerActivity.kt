@@ -6,7 +6,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -20,30 +22,37 @@ import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import app.fluffy.AppGraph
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import app.fluffy.data.repository.AppSettings
+import app.fluffy.data.repository.SettingsRepository
+import app.fluffy.io.SafIo
 import app.fluffy.ui.theme.FluffyTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 import java.nio.charset.Charset
 
-class TextViewerActivity : ComponentActivity() {
+class TextViewerActivity : ComponentActivity(), KoinComponent {
+    private val io: SafIo by inject()
+    private val settings: SettingsRepository by inject()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        AppGraph.init(applicationContext)
         val uri = intent?.data ?: run { finish(); return }
-        val title = intent?.getStringExtra(EXTRA_TITLE) ?: AppGraph.io.queryDisplayName(uri)
+        val title = intent?.getStringExtra(EXTRA_TITLE) ?: io.queryDisplayName(uri)
 
         setContent {
-            val settings = AppGraph.settings.settingsFlow.collectAsState(initial = AppSettings()).value
-            val dark = when (settings.themeMode) {
-                0 -> androidx.compose.foundation.isSystemInDarkTheme()
+            val s = settings.settingsFlow.collectAsState(initial = AppSettings()).value
+            val dark = when (s.themeMode) {
+                0 -> isSystemInDarkTheme()
                 1 -> false
                 else -> true
             }
-            FluffyTheme(darkTheme = dark, useAuroraTheme = settings.useAuroraTheme) {
-                TextViewerScreen(uri, title) { finish() }
+            FluffyTheme(darkTheme = dark, useAuroraTheme = s.useAuroraTheme) {
+                TextViewerScreen(uri, title, io) { finish() }
             }
         }
     }
@@ -52,7 +61,7 @@ class TextViewerActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TextViewerScreen(uri: Uri, title: String, onClose: () -> Unit) {
+private fun TextViewerScreen(uri: Uri, title: String, io: SafIo, onClose: () -> Unit) {
     BackHandler { onClose() }
     var content by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -63,7 +72,7 @@ private fun TextViewerScreen(uri: Uri, title: String, onClose: () -> Unit) {
         val max = 2 * 1024 * 1024 // 2 MB guard
         runCatching {
             withContext(Dispatchers.IO) {
-                AppGraph.io.openIn(uri).use { input ->
+                io.openIn(uri).use { input ->
                     if (input.available() > max) throw IllegalStateException("File too large to preview")
                     val bytes = input.readBytes()
                     val charset = sniffCharset(bytes) ?: Charsets.UTF_8
@@ -77,7 +86,7 @@ private fun TextViewerScreen(uri: Uri, title: String, onClose: () -> Unit) {
         topBar = {
             TopAppBar(
                 title = { Text(title) },
-                actions = { TextButton(onClick = onClose) { Text("Close") } }
+                navigationIcon = { IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } }
             )
         }
     ) { pv ->
@@ -167,11 +176,13 @@ private fun TextViewerScreen(uri: Uri, title: String, onClose: () -> Unit) {
                         .onPreviewKeyEvent(keyHandler)
                 ) {
                     Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(12.dp)) {
-                        Text(
-                            text = content!!,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontFamily = FontFamily.Monospace
-                        )
+                        SelectionContainer {
+                            Text(
+                                text = content!!,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
                         Spacer(Modifier.height(24.dp))
                     }
                 }

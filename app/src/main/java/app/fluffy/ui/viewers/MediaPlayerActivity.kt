@@ -16,6 +16,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -42,28 +43,35 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import app.fluffy.AppGraph
 import app.fluffy.data.repository.AppSettings
+import app.fluffy.data.repository.SettingsRepository
+import app.fluffy.io.SafIo
 import app.fluffy.ui.dialogs.FluffyDialog
 import app.fluffy.ui.theme.FluffyTheme
+import androidx.media3.common.util.UnstableApi
 import io.github.kdroidfilter.composemediaplayer.VideoPlayerSurface
 import io.github.kdroidfilter.composemediaplayer.rememberVideoPlayerState
 import kotlinx.coroutines.delay
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 
-class MediaPlayerActivity : ComponentActivity() {
+class MediaPlayerActivity : ComponentActivity(), KoinComponent {
+    private val io: SafIo by inject()
+    private val settings: SettingsRepository by inject()
+
     companion object { const val EXTRA_TITLE = "title" }
 
+    @UnstableApi
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        AppGraph.init(applicationContext)
 
         val uri = intent?.data ?: run { finish(); return }
-        val title = intent?.getStringExtra(EXTRA_TITLE) ?: AppGraph.io.queryDisplayName(uri)
+        val title = intent?.getStringExtra(EXTRA_TITLE) ?: io.queryDisplayName(uri)
 
         setContent {
-            val settings = AppGraph.settings.settingsFlow.collectAsState(initial = AppSettings()).value
-            val dark = when (settings.themeMode) { 0 -> isSystemInDarkTheme(); 1 -> false; else -> true }
-            FluffyTheme(darkTheme = dark, useAuroraTheme = settings.useAuroraTheme) {
+            val s = settings.settingsFlow.collectAsState(initial = AppSettings()).value
+            val dark = when (s.themeMode) { 0 -> isSystemInDarkTheme(); 1 -> false; else -> true }
+            FluffyTheme(darkTheme = dark, useAuroraTheme = s.useAuroraTheme) {
                 MediaPlayerScreen(
                     url = uri.toString(), title = title,
                     onClose = { finish() }
@@ -76,6 +84,7 @@ class MediaPlayerActivity : ComponentActivity() {
 private val PLAYBACK_SPEEDS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
 
 @OptIn(ExperimentalMaterial3Api::class)
+@UnstableApi
 @Composable
 internal fun MediaPlayerScreen(
     url: String,
@@ -186,7 +195,11 @@ internal fun MediaPlayerScreen(
                 TopAppBar(
                     title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.White) },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-                    actions = { TextButton(onClick = onClose) { Text("Close", color = Color.White) } }
+                    navigationIcon = {
+                        IconButton(onClick = onClose) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                        }
+                    }
                 )
             }
         }

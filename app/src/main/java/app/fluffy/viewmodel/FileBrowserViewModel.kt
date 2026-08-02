@@ -3,6 +3,7 @@ package app.fluffy.viewmodel
 import android.net.Uri
 import android.os.Environment
 import androidx.documentfile.provider.DocumentFile
+import androidx.compose.runtime.mutableStateListOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.fluffy.archive.ArchiveEngine
@@ -52,9 +53,8 @@ data class FileBrowserState(
     val isLoading: Boolean = false,
     val error: String? = null,
     val canAccessFileSystem: Boolean = false,
-    val pendingFileOpen: Uri? = null,
-    val pendingArchiveOpen: Uri? = null,
-    val selectedItems: MutableList<Uri> = mutableListOf(),
+    val pendingAction: PendingAction = PendingAction.None,
+    val selectedItems: MutableList<Uri> = mutableStateListOf(),
     val isPickerMode: Boolean = false,
     val pickerMimeType: String? = null
 )
@@ -607,11 +607,11 @@ class FileBrowserViewModel(
     }
 
     private suspend fun handleFileOpen(uri: Uri) {
-        _state.value = _state.value.copy(pendingFileOpen = uri)
+        _state.value = _state.value.copy(pendingAction = PendingAction.OpenFile(uri))
     }
 
-    fun clearPendingFileOpen() {
-        _state.value = _state.value.copy(pendingFileOpen = null)
+    fun clearPendingAction() {
+        _state.value = _state.value.copy(pendingAction = PendingAction.None)
     }
 
     fun createNewFolder(name: String) {
@@ -707,14 +707,11 @@ class FileBrowserViewModel(
     }
 
     fun setPendingArchiveOpen(uri: Uri) {
-        _state.value = _state.value.copy(pendingArchiveOpen = uri)
-    }
-    fun clearPendingArchiveOpen() {
-        _state.value = _state.value.copy(pendingArchiveOpen = null)
+        _state.value = _state.value.copy(pendingAction = PendingAction.OpenArchive(uri))
     }
 
     fun clearSelection() {
-        _state.update { it.copy(selectedItems = mutableListOf()) }
+        _state.update { it.copy(selectedItems = mutableStateListOf()) }
     }
 
     fun setPickerMode(enabled: Boolean, mimeType: String?) {
